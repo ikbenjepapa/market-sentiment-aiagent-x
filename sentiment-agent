@@ -1,0 +1,95 @@
+import os
+import time
+import asyncio
+import pandas as pd
+import torch
+from datetime import datetime, timedelta
+from transformers import AutoTokenizer, AutoModelForSequenceClassification
+from dotenv import load_dotenv
+import pyttsx3
+
+# Configuration
+TOKENS_TO_TRACK = ["solana", "bitcoin", "ethereum"]
+TWEETS_PER_RUN = 30
+DATA_FOLDER = "data/sentiment"
+SENTIMENT_HISTORY_FILE = "data/sentiment_history.csv"
+CHECK_INTERVAL_MINUTES = 12 * 60  # 12 hours in minutes
+IGNORE_LIST = ['t.co', 'discord', 'join', 'telegram', 'discount', 'pay']
+SENTIMENT_ANNOUNCE_THRESHOLD = 0.4
+
+# Ensure data folder exists
+os.makedirs(DATA_FOLDER, exist_ok=True)
+load_dotenv()
+
+class SentimentAgent:
+    def __init__(self):
+        self.tokenizer = AutoTokenizer.from_pretrained("finiteautomata/bertweet-base-sentiment-analysis")
+        self.model = AutoModelForSequenceClassification.from_pretrained("finiteautomata/bertweet-base-sentiment-analysis")
+        self.tts_engine = pyttsx3.init()  # Initialize text-to-speech engine
+
+        # Initialize sentiment history
+        if not os.path.exists(SENTIMENT_HISTORY_FILE):
+            pd.DataFrame(columns=['timestamp', 'sentiment_score']).to_csv(SENTIMENT_HISTORY_FILE, index=False)
+
+    def analyze_sentiment(self, texts):
+        inputs = self.tokenizer(texts, padding=True, truncation=True, max_length=128, return_tensors="pt")
+        with torch.no_grad():
+            outputs = self.model(**inputs)
+            scores = torch.nn.functional.softmax(outputs.logits, dim=-1)
+
+        sentiment_scores = scores[:, 2] - scores[:, 0]  # Positive - Negative
+        return sentiment_scores.mean().item()
+
+    def save_sentiment(self, sentiment_score):
+        new_entry = pd.DataFrame([{ 'timestamp': datetime.now().isoformat(), 'sentiment_score': sentiment_score }])
+        if os.path.exists(SENTIMENT_HISTORY_FILE):
+            history = pd.read_csv(SENTIMENT_HISTORY_FILE)
+            history = pd.concat([history, new_entry], ignore_index=True)
+        else:
+            history = new_entry
+        history.to_csv(SENTIMENT_HISTORY_FILE, index=False)
+
+    def announce(self, message):
+        """Announce a message using text-to-speech."""
+        print(f"🗣️ Announcing: {message}")
+        self.tts_engine.say(message)
+        self.tts_engine.runAndWait()
+
+    async def fetch_tweets(self, token):
+        # Placeholder for fetching tweets (replace with actual implementation)
+        # Simulating tweets as a list of strings
+        return [f"This is a tweet about {token}" for _ in range(TWEETS_PER_RUN)]
+
+    async def analyze_token(self, token):
+        tweets = await self.fetch_tweets(token)
+        filtered_tweets = [t for t in tweets if not any(word in t for word in IGNORE_LIST)]
+        if not filtered_tweets:
+            print(f"No relevant tweets found for {token}")
+            return
+
+        sentiment_score = self.analyze_sentiment(filtered_tweets)
+        self.save_sentiment(sentiment_score)
+
+        sentiment = "positive" if sentiment_score > 0 else "negative"
+        message = f"Sentiment for {token}: {sentiment} with a score of {sentiment_score:.2f}."
+        print(message)
+
+        # Announce sentiment
+        self.announce(message)
+
+        if abs(sentiment_score) > SENTIMENT_ANNOUNCE_THRESHOLD:
+            significant_message = f"Significant sentiment detected for {token}: {sentiment_score:.2f}."
+            print(significant_message)
+            self.announce(significant_message)
+
+    async def run(self):
+        while True:
+            for token in TOKENS_TO_TRACK:
+                await self.analyze_token(token)
+            next_run_time = datetime.now() + timedelta(seconds=CHECK_INTERVAL_MINUTES * 60)  # Convert minutes to seconds
+            print(f"Next run at {next_run_time}")
+            await asyncio.sleep(CHECK_INTERVAL_MINUTES * 60)  # Convert minutes to seconds
+
+if __name__ == "__main__":
+    agent = SentimentAgent()
+    asyncio.run(agent.run())
